@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Parking System - Real-time parking management</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0f172a; /* Slate 900 */
+            color: #f8fafc;
+        }
+        .pro-card {
+            background-color: #1e293b; /* Slate 800 */
+            border-radius: 12px;
+            border: 1px solid #334155;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        .pulse-dot {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .slot-btn {
+            aspect-ratio: 1;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        .slot-free { 
+            background-color: rgba(16, 185, 129, 0.1); 
+            color: #34d399; 
+            border: 1px solid rgba(16, 185, 129, 0.4); 
+            box-shadow: inset 0 0 12px rgba(16, 185, 129, 0.1);
+        }
+        .slot-free:hover { 
+            background-color: rgba(16, 185, 129, 0.2); 
+            border-color: #10b981; 
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2);
+        }
+        
+        .slot-occupied { 
+            background-color: rgba(239, 68, 68, 0.1); 
+            color: #f87171; 
+            border: 1px solid rgba(239, 68, 68, 0.3); 
+            cursor: not-allowed;
+            opacity: 0.8;
+        }
+        
+        .slot-reserved { 
+            background-color: rgba(245, 158, 11, 0.1); 
+            color: #fbbf24; 
+            border: 1px solid rgba(245, 158, 11, 0.4); 
+            cursor: not-allowed;
+        }
+        
+        /* Modal Background */
+        .modal-bg { background: rgba(15, 23, 42, 0.8); backdrop-filter: blur(4px); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        function Dashboard() {
+            const [user, setUser] = useState(null);
+            const [slots, setSlots] = useState([]);
+            const [myBookings, setMyBookings] = useState([]);
+            const [selectedSlot, setSelectedSlot] = useState(null);
+            
+            // Modal states
+            const [showBookingModal, setShowBookingModal] = useState(false);
+            const [showMyBookings, setShowMyBookings] = useState(false);
+            
+            // Booking form
+            const [carNumber, setCarNumber] = useState('');
+            const [bookingDate, setBookingDate] = useState('');
+            const [startTime, setStartTime] = useState('');
+            const [endTime, setEndTime] = useState('');
+            const [calculatedTotal, setCalculatedTotal] = useState(0);
+            
+            const [stats, setStats] = useState({ total: 0, free: 0, occupied: 0, revenue: 0 });
+            const [wsConnected, setWsConnected] = useState(false);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState('');
+            const [success, setSuccess] = useState('');
+
+            const BACKEND_URL = "http://localhost:8000/api/v1";
+            const WS_URL = "ws://localhost:8000/api/v1/ws/lot/1";
+
+            useEffect(() => {
+                const token = localStorage.getItem('access_token');
+                if (!token) {
+                    window.location.href = 'login.html';
+                    return;
+                }
+
+                // Default date to local today
+                const tzoffset = (new Date()).getTimezoneOffset() * 60000;
+                const today = new Date(Date.now() - tzoffset).toISOString().split('T')[0];
+                setBookingDate(today);
+
+                fetchCurrentUser(token);
+                fetchSlots();
+                fetchRevenue();
+                fetchMyBookings(token);
+                connectWebSocket();
+
+                const refreshInterval = setInterval(() => {
+                    fetchSlots();
+                    fetchRevenue();
+                }, 3000);
+
+                return () => clearInterval(refreshInterval);
+            }, []);
+
+            useEffect(() => {
+                if(selectedSlot && bookingDate && startTime && endTime) {
+                    const startDT = new Date(`${bookingDate}T${startTime}`);
+                    const endDT = new Date(`${bookingDate}T${endTime}`);
+                    const diffMs = endDT - startDT;
+                    if(diffMs > 0) {
+                        const diffHours = diffMs / (1000 * 60 * 60);
+                        setCalculatedTotal(Math.ceil(diffHours) * selectedSlot.rate_per_hour);
+                    } else {
+                        setCalculatedTotal(0);
+                    }
+                } else {
+                    setCalculatedTotal(0);
+                }
+            }, [selectedSlot, bookingDate, startTime, endTime]);
+
+            const connectWebSocket = () => {
+                const ws = new WebSocket(WS_URL);
+                ws.onopen = () => setWsConnected(true);
+                ws.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'slot_update') {
+                        setSlots(prev => {
+                            const updated = prev.map(s => s.id === data.slot.id ? { ...s, status: data.slot.status } : s);
+                            updateStats(updated);
+                            return updated;
+                        });
+                        fetchRevenue(); // Re-sync dynamic revenue when slots update
+                    }
+                };
+                ws.onerror = () => setWsConnected(false);
+                ws.onclose = () => {
+                    setWsConnected(false);
+                    setTimeout(connectWebSocket, 3000);
+                };
+            };
+
+            const fetchCurrentUser = async (token) => {
+                try {
+                    const response = await fetch(`${BACKEND_URL}/auth/me`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (response.ok) {
+                        setUser(await response.json());
+                    } else {
+                        localStorage.removeItem('access_token');
+                        window.location.href = 'login.html';
+                    }
+                } catch(e) { window.location.href = 'login.html'; }
+            };
+
+            const fetchRevenue = async () => {
+                try {
+                    const res = await fetch(`${BACKEND_URL}/lots/1/revenue`);
+                    if(res.ok) {
+                        const data = await res.json();
+                        setStats(prev => ({ ...prev, revenue: data.revenue || 0 }));
+                    }
+                } catch(e) {}
+            };
+
+            const fetchSlots = async () => {
+                try {
+                    const response = await fetch(`${BACKEND_URL}/lots/`);
+                    const data = await response.json();
+                    if (data.length > 0) {
+                        setSlots(data[0].slots || []);
+                        updateStats(data[0].slots || []);
+                    }
+                } catch(e) {}
+            };
+
+            const fetchMyBookings = async (token) => {
+                try {
+                    const response = await fetch(`${BACKEND_URL}/bookings/my_bookings`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (response.ok) {
+                        setMyBookings(await response.json());
+                    }
+                } catch(e) {}
+            };
+
+            const updateStats = (slotList) => {
+                const total = slotList.length;
+                const free = slotList.filter(s => s.status === 'free').length;
+                const occupied = total - free;
+                setStats(prev => ({ ...prev, total, free, occupied })); 
+            };
+
+            const handleLogout = () => {
+                localStorage.removeItem('access_token');
+                window.location.href = 'login.html';
+            };
+
+            const handleBookSlot = (slot) => {
+                if (slot.status === 'free') {
+                    setSelectedSlot(slot);
+                    setShowBookingModal(true);
+                }
+            };
+            
+            const adminClearSlots = async () => {
+                if(!confirm("Attempt to clear all slots?")) return;
+                try {
+                    const token = localStorage.getItem('access_token');
+                    const response = await fetch(`${BACKEND_URL}/lots/1/clear_slots`, {
+                        method: 'POST',
+                        headers: { 
+                            'Authorization': `Bearer ${token}`
+                        }
+                    });
+                    if (response.ok) {
+                        alert("Success! All slots cleared.");
+                        fetchSlots();
+                        fetchMyBookings(token);
+                        fetchRevenue();
+                    } else {
+                        const err = await response.text();
+                        alert("Clear failed from server: " + response.status + " - " + err);
+                    }
+                } catch(e) { alert("Admin clear network failed: " + e.message); }
+            }
+            
+            const cancelBooking = async (bookingId) => {
+                if(!confirm("Are you sure you want to cancel this registration?")) return;
+                try {
+                    const token = localStorage.getItem('access_token');
+                    const response = await fetch(`${BACKEND_URL}/bookings/${bookingId}/cancel`, {
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if(response.ok) {
+                        alert("Registration Cancelled");
+                        fetchMyBookings(token);
+                        fetchSlots();
+                        fetchRevenue();
+                    }
+                } catch(e) { alert("Failed to cancel"); }
+            }
+
+            const confirmBooking = async () => {
+                if (!selectedSlot || !carNumber || !startTime || !endTime || !bookingDate) {
+                    setError("Please fill all details");
+                    return;
+                }
+                
+                // Formulate dates
+                const startDT = `${bookingDate}T${startTime}`;
+                const endDT = `${bookingDate}T${endTime}`;
+
+                setLoading(true);
+                setError('');
+
+                try {
+                    const token = localStorage.getItem('access_token');
+                    
+                    // Send to backend as a mock fully-paid session since they scanned the custom QR
+                    const verifyResponse = await fetch(`${BACKEND_URL}/bookings/verify`, {
+                        method: 'POST',
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${token}` 
+                        },
+                        body: JSON.stringify({
+                            razorpay_order_id: "mock_order",
+                            razorpay_payment_id: "mock_payment",
+                            razorpay_signature: "mock_signature",
+                            slot_id: selectedSlot.id,
+                            car_number: carNumber,
+                            start_time: startDT,
+                            end_time: endDT
+                        })
+                    });
+
+                    if (verifyResponse.ok) {
+                        setSuccess(`✅ Payment Complete! ${selectedSlot.name} is now booked!`);
+                        setCalculatedTotal(0);
+                        
+                        setTimeout(() => {
+                            setShowBookingModal(false);
+                            setSelectedSlot(null);
+                            setCarNumber('');
+                            fetchSlots();
+                            fetchMyBookings(token);
+                            fetchRevenue();
+                            setSuccess('');
+                        }, 2000);
+                    } else {
+                        const err = await verifyResponse.json();
+                        setError('❌ Payment failed: ' + (err.detail || ''));
+                    }
+
+                } catch (error) {
+                    setError(error.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            if (!user) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+
+            // Grouping Slots for Pro UI (up to 48 slots divided in 3 zones)
+            let zones = [[], [], []];
+            slots.forEach((s, i) => {
+                if (i < 16) zones[0].push(s);
+                else if (i < 32) zones[1].push(s);
+                else if (i < 48) zones[2].push(s);
+            });
+            
+            // Generate placeholders if fewer than 48 slots
+            for(let z=0; z<3; z++) {
+                while(zones[z].length < 16) {
+                    // padding to ensure 4x4 grid looks nice even with empty database
+                    zones[z].push(null); 
+                }
+            }
+            
+            const isAdmin = user?.email === 'admin@parksmart.test';
+
+            return (
+                <div className="max-w-[1400px] mx-auto pb-10">
+                    {/* Header Topbar */}
+                    <div className="flex items-center justify-between mb-8 pt-4">
+                        <div className="flex items-center space-x-4">
+                            <div className="bg-blue-600 p-2 rounded-lg text-white font-bold text-xl shadow-lg">P</div>
+                            <div>
+                                <h1 className="text-xl font-bold tracking-tight">Smart Parking System</h1>
+                                <div className="flex items-center space-x-3 mt-1">
+                                    <span className="text-xs bg-blue-500/10 text-blue-400 px-2.5 py-0.5 rounded-full font-semibold border border-blue-500/20 flex items-center shadow-inner">
+                                        👋 Welcome, <span className="text-gray-200 ml-1">{user?.name || user?.email?.split('@')[0] || 'User'}</span>
+                                    </span>
+                                    <p className="text-xs text-gray-500 hidden md:block border-l border-gray-700 pl-3">Real-time parking management</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div className="flex items-center space-x-6">
+                            <div className="flex items-center space-x-2 bg-gray-800 px-3 py-1.5 rounded-full border border-gray-700">
+                                <div className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-green-500' : 'bg-red-500'} pulse-dot`}></div>
+                                <span className="text-xs font-semibold text-gray-300">Live</span>
+                            </div>
+                            <div className="text-sm font-medium text-gray-300">
+                                {new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                            </div>
+                            {!isAdmin && (
+                                <button onClick={() => setShowMyBookings(true)} className="text-sm bg-blue-600/20 text-blue-400 px-3 py-1.5 rounded hover:bg-blue-600/30 transition">
+                                    My Bookings
+                                </button>
+                            )}
+                            {/* Admin Clear Button */}
+                            {isAdmin && (
+                                <button onClick={adminClearSlots} className="text-sm bg-red-600/20 text-red-400 px-3 py-1.5 rounded hover:bg-red-600/30 transition shadow-lg">
+                                    Clear Slots (Admin)
+                                </button>
+                            )}
+                            <button onClick={handleLogout} className="text-sm text-gray-400 hover:text-white transition">Logout</button>
+                        </div>
+                    </div>
+
+                    {/* Notification Toasts */}
+                    {success && <div className="mb-4 p-3 bg-green-500/20 border border-green-500 text-green-300 rounded-lg">{success}</div>}
+                    {error && <div className="mb-4 p-3 bg-red-500/20 border border-red-500 text-red-300 rounded-lg">{error}</div>}
+
+                    {/* Stat Cards */}
+                    <div className={`grid ${isAdmin ? 'grid-cols-4' : 'grid-cols-3'} gap-6 mb-8`}>
+                        <div className="pro-card p-5 relative overflow-hidden">
+                            <div className="text-xs text-gray-400 font-semibold mb-1 uppercase tracking-wider flex justify-between">
+                                Available <span className="bg-green-500/20 text-green-400 p-1 rounded-full"><svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"></path></svg></span>
+                            </div>
+                            <div className="text-3xl font-bold text-white mb-1">{stats.free}</div>
+                            <div className="text-xs text-gray-500">spots open</div>
+                        </div>
+                        <div className="pro-card p-5">
+                            <div className="text-xs text-gray-400 font-semibold mb-1 uppercase tracking-wider flex justify-between">
+                                Occupied <span className="bg-red-500/20 text-red-400 p-1 rounded-full"><svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd"></path></svg></span>
+                            </div>
+                            <div className="text-3xl font-bold text-white mb-1">{stats.occupied}</div>
+                            <div className="text-xs text-gray-500">spots taken</div>
+                        </div>
+                        <div className="pro-card p-5">
+                            <div className="text-xs text-gray-400 font-semibold mb-1 uppercase tracking-wider">Occupancy</div>
+                            <div className="text-3xl font-bold text-white mb-1">{stats.total ? Math.round((stats.occupied/stats.total)*100) : 0}%</div>
+                            <div className="text-xs text-gray-500">current rate</div>
+                        </div>
+                        {isAdmin && (
+                            <div className="pro-card p-5">
+                                <div className="text-xs text-gray-400 font-semibold mb-1 uppercase tracking-wider flex justify-between">
+                                    Revenue
+                                    <span className="bg-purple-500/20 text-purple-400 p-1 rounded-full"><svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path d="M4 4a2 2 0 00-2 2v1h16V6a2 2 0 00-2-2H4z"></path><path fillRule="evenodd" d="M18 9H2v5a2 2 0 002 2h12a2 2 0 002-2V9zM4 13a1 1 0 011-1h1a1 1 0 110 2H5a1 1 0 01-1-1zm5-1a1 1 0 100 2h1a1 1 0 100-2H9z" clipRule="evenodd"></path></svg></span>
+                                </div>
+                                <div className="text-3xl font-bold text-white mb-1">₹{stats.revenue}</div>
+                                <div className="text-xs text-gray-500">today's earnings</div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* 3 Zones Grid */}
+                    <div className="grid grid-cols-3 gap-6">
+                        {/* Zone A */}
+                        <div className="pro-card p-6">
+                            <div className="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
+                                <div>
+                                    <div className="text-lg font-bold text-gray-200">Zone A - Main</div>
+                                    <div className="text-xs text-gray-500">Ground Floor</div>
+                                </div>
+                                <div className="text-xs font-semibold bg-green-500/10 text-green-400 px-2 py-1 rounded-lg">
+                                    {zones[0].filter(s => s?.status === 'free').length} free
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-4 gap-3">
+                                {zones[0].map((slot, idx) => (
+                                    <div key={idx} 
+                                      onClick={() => slot && handleBookSlot(slot)}
+                                      className={`slot-btn flex-col ${!slot ? 'bg-gray-800 border border-gray-700' : slot.status==='free' ? 'slot-free' : slot.status === 'reserved' ? 'slot-reserved' : 'slot-occupied'}`}>
+                                        <div className="font-bold">{slot ? slot.name : 'N/A'}</div>
+                                        {slot && <div className="text-[10px] opacity-80 mt-1">₹{slot.rate_per_hour}/hr</div>}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Zone B */}
+                        <div className="pro-card p-6">
+                            <div className="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
+                                <div>
+                                    <div className="text-lg font-bold text-gray-200">Zone B - Premium</div>
+                                    <div className="text-xs text-gray-500">Level 1</div>
+                                </div>
+                                <div className="text-xs font-semibold bg-yellow-500/10 text-yellow-400 px-2 py-1 rounded-lg">
+                                    {zones[1].filter(s => s?.status === 'free').length} free
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-4 gap-3">
+                                {zones[1].map((slot, idx) => (
+                                    <div key={idx} 
+                                      onClick={() => slot && handleBookSlot(slot)}
+                                      className={`slot-btn flex-col ${!slot ? 'bg-gray-800 border border-gray-700 opacity-50' : slot.status==='free' ? 'slot-free' : slot.status === 'reserved' ? 'slot-reserved' : 'slot-occupied'}`}>
+                                        <div className="font-bold">{slot ? slot.name : ''}</div>
+                                        {slot && <div className="text-[10px] opacity-80 mt-1">₹{slot.rate_per_hour}/hr</div>}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        {/* Zone C */}
+                        <div className="pro-card p-6">
+                            <div className="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
+                                <div>
+                                    <div className="text-lg font-bold text-gray-200">Zone C - Economy</div>
+                                    <div className="text-xs text-gray-500">Level 2</div>
+                                </div>
+                                <div className="text-xs font-semibold bg-red-500/10 text-red-400 px-2 py-1 rounded-lg">
+                                    {zones[2].filter(s => s?.status === 'free').length} free
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-4 gap-3">
+                                {zones[2].map((slot, idx) => (
+                                    <div key={idx} 
+                                      onClick={() => slot && handleBookSlot(slot)}
+                                      className={`slot-btn flex-col ${!slot ? 'bg-gray-800 border border-gray-700 opacity-50' : slot.status==='free' ? 'slot-free' : slot.status === 'reserved' ? 'slot-reserved' : 'slot-occupied'}`}>
+                                        <div className="font-bold">{slot ? slot.name : ''}</div>
+                                        {slot && <div className="text-[10px] opacity-80 mt-1">₹{slot.rate_per_hour}/hr</div>}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Booking Modal */}
+                    {showBookingModal && selectedSlot && (
+                        <div className="fixed inset-0 modal-bg flex items-center justify-center z-50 p-4">
+                            <div className="pro-card p-8 max-w-md w-full border border-gray-600 shadow-2xl">
+                                <h2 className="text-2xl font-bold mb-6 text-white text-center border-b border-gray-700 pb-4">
+                                    Parking Registration
+                                </h2>
+
+                                {/* Dynamic Error/Success Displays here instead of behind modal */}
+                                {success && <div className="mb-4 p-3 bg-green-500/20 border border-green-500 text-green-300 rounded-lg shadow-lg text-sm font-semibold animate-pulse">{success}</div>}
+                                {error && <div className="mb-4 p-3 bg-red-500/20 border border-red-500 text-red-300 rounded-lg shadow-lg text-sm">{error}</div>}
+                                
+                                <div className="bg-gray-900/50 p-4 rounded-lg mb-6 border border-gray-700 flex justify-between items-center">
+                                    <span className="text-gray-400 font-medium">Selected Slot</span>
+                                    <span className="bg-blue-500 text-white px-3 py-1 rounded font-bold flex flex-col items-center">
+                                        <span>{selectedSlot.name}</span>
+                                        <span className="text-xs opacity-80">₹{selectedSlot.rate_per_hour}/hr</span>
+                                    </span>
+                                </div>
+
+                                <div className="space-y-4 mb-8">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-400 mb-1">Car Number</label>
+                                        <input type="text" value={carNumber} onChange={e => setCarNumber(e.target.value)}
+                                            placeholder="e.g. MH12 AB 1234"
+                                            className="w-full bg-gray-800 border border-gray-600 text-white px-4 py-2 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-400 mb-1">Select Date</label>
+                                        <input type="date" value={bookingDate} onChange={e => setBookingDate(e.target.value)}
+                                            className="w-full bg-gray-800 border border-gray-600 text-white px-4 py-2 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-400 mb-1">Start Time</label>
+                                            <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)}
+                                                className="w-full bg-gray-800 border border-gray-600 text-white px-4 py-2 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-400 mb-1">End Time</label>
+                                            <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)}
+                                                className="w-full bg-gray-800 border border-gray-600 text-white px-4 py-2 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                                        </div>
+                                    </div>
+                                    
+                                    {calculatedTotal > 0 && (
+                                        <div className="bg-gray-900/80 p-5 rounded-xl border border-blue-500/30 flex items-center justify-between shadow-inner mt-4">
+                                            <div>
+                                                <div className="text-gray-400 text-sm mb-1 uppercase tracking-wider font-semibold">Total Amount Due</div>
+                                                <div className="text-3xl font-bold text-green-400 border-b border-green-500/50 pb-1 w-max">₹{calculatedTotal}</div>
+                                                <div className="text-xs text-blue-300 mt-2 font-medium flex items-center">
+                                                    <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                                    Tap & Pay via QR UPI 
+                                                </div>
+                                            </div>
+                                            <div className="bg-white p-2 rounded-xl shrink-0 shadow-lg ml-4">
+                                                <img src={`https://api.qrserver.com/v1/create-qr-code/?size=100x100&data=upi://pay?pa=parksmartpro@ybl&pn=ParkSmart&am=${calculatedTotal}&cu=INR`} alt="Payment QR" className="w-[100px] h-[100px]" />
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div className="flex space-x-3">
+                                    <button onClick={confirmBooking} disabled={loading}
+                                        className="flex-1 bg-green-600 hover:bg-green-500 text-white py-3 rounded-lg font-semibold transition disabled:opacity-50">
+                                        {loading ? 'Processing...' : 'Pay & Confirm'}
+                                    </button>
+                                    <button onClick={() => { setShowBookingModal(false); setSelectedSlot(null); }}
+                                        className="flex-1 bg-gray-700 hover:bg-gray-600 text-white py-3 rounded-lg font-semibold transition">
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* My Bookings Modal */}
+                    {showMyBookings && (
+                        <div className="fixed inset-0 modal-bg flex justify-end z-50">
+                            <div className="pro-card w-full max-w-md h-full rounded-none border-l border-gray-600 p-6 overflow-y-auto">
+                                <div className="flex justify-between items-center mb-6">
+                                    <h2 className="text-xl font-bold text-white">My Registrations</h2>
+                                    <button onClick={() => setShowMyBookings(false)} className="text-gray-400 hover:text-white">✕</button>
+                                </div>
+                                
+                                {myBookings.length === 0 ? (
+                                    <div className="text-center text-gray-500 mt-10">No active registrations.</div>
+                                ) : (
+                                    <div className="space-y-4">
+                                        {myBookings.map(b => (
+                                            <div key={b.id} className="bg-gray-800 border border-gray-700 p-4 rounded-lg">
+                                                <div className="flex justify-between mb-2">
+                                                    <span className="font-bold text-blue-400">Slot #{b.slot_id}</span>
+                                                    <span className="text-xs bg-green-500/20 text-green-400 px-2 py-1 rounded">Active</span>
+                                                </div>
+                                                <div className="text-sm text-gray-300 mb-1">🚗 {b.car_number}</div>
+                                                <div className="text-xs text-gray-400 mb-3">
+                                                    {new Date(b.start_time).toLocaleString()} - {new Date(b.end_time).toLocaleTimeString()}
+                                                </div>
+                                                <div className="flex items-center justify-between mb-3 border-t border-gray-700 pt-3">
+                                                    <span className="text-sm font-semibold">Total Paid</span>
+                                                    <span className="text-green-400 font-bold">₹{b.amount}</span>
+                                                </div>
+                                                <button onClick={() => cancelBooking(b.id)} className="w-full text-sm bg-red-600/20 text-red-400 hover:bg-red-600/40 py-2 rounded transition">
+                                                    Cancel Registration
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<Dashboard />);
+    </script>
+</body>
+</html>
