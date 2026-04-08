@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 import razorpay
 from typing import Any, List
 from datetime import datetime
@@ -132,3 +132,62 @@ def cancel_booking(
         
     db.commit()
     return {"status": "success", "message": "Booking cancelled successfully"}
+
+def _get_all_active_bookings_logic(
+    db: Session,
+    current_user: models.User
+) -> List[schemas.BookingWithUser]:
+    """Shared logic for admin active bookings retrieval."""
+    if current_user.email != "admin@parksmart.test":
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    bookings = (
+        db.query(models.Booking)
+        .options(joinedload(models.Booking.user), joinedload(models.Booking.slot))
+        .filter(models.Booking.status == "paid")
+        .order_by(models.Booking.created_at.desc())
+        .all()
+    )
+
+    result = []
+    for b in bookings:
+        user_name = b.user.name if b.user else "Unknown"
+        user_email = b.user.email if b.user else "Unknown"
+        slot_name = b.slot.name if b.slot else f"Slot {b.slot_id}"
+
+        result.append(schemas.BookingWithUser(
+            id=b.id,
+            slot_id=b.slot_id,
+            user_id=b.user_id,
+            car_number=b.car_number,
+            start_time=b.start_time,
+            end_time=b.end_time,
+            amount=b.amount,
+            status=b.status,
+            razorpay_order_id=b.razorpay_order_id,
+            created_at=b.created_at,
+            updated_at=b.updated_at,
+            user_name=user_name,
+            user_email=user_email,
+            slot_name=slot_name
+        ))
+
+    return result
+
+
+@router.get("/all_active", response_model=List[schemas.BookingWithUser])
+def get_all_active_bookings(
+    db: Session = Depends(session.get_db),
+    current_user: models.User = Depends(security.get_current_user)
+):
+    """Admin-only: Get all active (paid) bookings with user details."""
+    return _get_all_active_bookings_logic(db, current_user)
+
+
+@router.get("/all_active_bookings", response_model=List[schemas.BookingWithUser])
+def get_all_active_bookings_alias(
+    db: Session = Depends(session.get_db),
+    current_user: models.User = Depends(security.get_current_user)
+):
+    """Admin-only: Alias for /all_active — returns all active (paid) bookings with user details."""
+    return _get_all_active_bookings_logic(db, current_user)

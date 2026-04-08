@@ -131,6 +131,12 @@ class Booking(BaseModel):
         from_attributes = True
 
 
+class BookingWithUser(Booking):
+    user_name: Optional[str] = None
+    user_email: Optional[str] = None
+    slot_name: Optional[str] = None
+
+
 class SlotStatusUpdate(BaseModel):
     status: str = Field(..., description="New status: free, occupied, reserved")
     

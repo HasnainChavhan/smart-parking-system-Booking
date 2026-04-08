@@ -70,6 +70,48 @@
         
         /* Modal Background */
         .modal-bg { background: rgba(15, 23, 42, 0.8); backdrop-filter: blur(4px); }
+
+        /* Admin-specific styles */
+        .admin-badge {
+            background: linear-gradient(135deg, #7c3aed, #4f46e5);
+            color: #e0d7ff;
+            font-size: 0.65rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            padding: 2px 8px;
+            border-radius: 9999px;
+            border: 1px solid rgba(124, 58, 237, 0.5);
+        }
+        .admin-table th {
+            background-color: rgba(15, 23, 42, 0.9);
+        }
+        .admin-table tr:hover td {
+            background-color: rgba(30, 41, 59, 0.7);
+        }
+        .time-badge-ok {
+            background: rgba(16, 185, 129, 0.15);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+        .time-badge-warn {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+        .time-badge-expired {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+        .time-badge {
+            padding: 2px 10px;
+            border-radius: 9999px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            font-family: monospace;
+        }
     </style>
 </head>
 <body>
@@ -82,6 +124,7 @@
             const [user, setUser] = useState(null);
             const [slots, setSlots] = useState([]);
             const [myBookings, setMyBookings] = useState([]);
+            const [adminBookings, setAdminBookings] = useState([]);
             const [selectedSlot, setSelectedSlot] = useState(null);
             
             // Modal states
@@ -103,6 +146,20 @@
 
             const BACKEND_URL = "http://localhost:8000/api/v1";
             const WS_URL = "ws://localhost:8000/api/v1/ws/lot/1";
+
+            // Helper: format time remaining until end_time
+            const getTimeRemaining = (endTimeStr) => {
+                const end = new Date(endTimeStr);
+                const now = new Date();
+                const diffMs = end - now;
+                if (diffMs <= 0) return { label: 'Expired', cls: 'time-badge-expired' };
+                const totalMins = Math.floor(diffMs / 60000);
+                const hrs = Math.floor(totalMins / 60);
+                const mins = totalMins % 60;
+                const label = hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+                const cls = totalMins < 30 ? 'time-badge-warn' : 'time-badge-ok';
+                return { label, cls };
+            };
 
             useEffect(() => {
                 const token = localStorage.getItem('access_token');
@@ -167,13 +224,31 @@
                 };
             };
 
+            const fetchAdminBookings = async (token) => {
+                try {
+                    const response = await fetch(`${BACKEND_URL}/bookings/all_active`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    if (response.ok) {
+                        setAdminBookings(await response.json());
+                    }
+                } catch(e) {}
+            };
+
             const fetchCurrentUser = async (token) => {
                 try {
                     const response = await fetch(`${BACKEND_URL}/auth/me`, {
                         headers: { 'Authorization': `Bearer ${token}` }
                     });
                     if (response.ok) {
-                        setUser(await response.json());
+                        const userData = await response.json();
+                        setUser(userData);
+                        if(userData.email === 'admin@parksmart.test') {
+                            fetchAdminBookings(token);
+                            // Auto-refresh admin bookings every 30 seconds
+                            const adminRefresh = setInterval(() => fetchAdminBookings(token), 30000);
+                            return () => clearInterval(adminRefresh);
+                        }
                     } else {
                         localStorage.removeItem('access_token');
                         window.location.href = 'login.html';
@@ -247,6 +322,7 @@
                         fetchSlots();
                         fetchMyBookings(token);
                         fetchRevenue();
+                        fetchAdminBookings(token);
                     } else {
                         const err = await response.text();
                         alert("Clear failed from server: " + response.status + " - " + err);
@@ -267,6 +343,7 @@
                         fetchMyBookings(token);
                         fetchSlots();
                         fetchRevenue();
+                        if (user?.email === 'admin@parksmart.test') fetchAdminBookings(token);
                     }
                 } catch(e) { alert("Failed to cancel"); }
             }
@@ -362,6 +439,7 @@
                                     <span className="text-xs bg-blue-500/10 text-blue-400 px-2.5 py-0.5 rounded-full font-semibold border border-blue-500/20 flex items-center shadow-inner">
                                         👋 Welcome, <span className="text-gray-200 ml-1">{user?.name || user?.email?.split('@')[0] || 'User'}</span>
                                     </span>
+                                    {isAdmin && <span className="admin-badge">⚡ Administrator</span>}
                                     <p className="text-xs text-gray-500 hidden md:block border-l border-gray-700 pl-3">Real-time parking management</p>
                                 </div>
                             </div>
@@ -498,6 +576,77 @@
                             </div>
                         </div>
                     </div>
+
+                    {/* Admin Control Center: Active User Bookings */}
+                    {isAdmin && (
+                        <div className="pro-card p-6 mt-8" id="admin-control-center">
+                            <div className="flex items-center justify-between mb-6">
+                                <h2 className="text-xl font-bold text-gray-200 flex items-center">
+                                    <svg className="w-5 h-5 mr-3 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+                                    Admin Control Center
+                                    <span className="ml-3 text-sm font-semibold bg-violet-500/20 text-violet-300 px-3 py-0.5 rounded-full border border-violet-500/30">
+                                        {adminBookings.length} Active
+                                    </span>
+                                </h2>
+                                <button
+                                    onClick={() => fetchAdminBookings(localStorage.getItem('access_token'))}
+                                    className="text-xs text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 px-3 py-1.5 rounded-lg border border-gray-700 transition flex items-center gap-1.5"
+                                >
+                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                                    Refresh
+                                </button>
+                            </div>
+                            <div className="overflow-x-auto rounded-lg border border-gray-700">
+                                <table className="w-full text-left text-sm text-gray-400 admin-table">
+                                    <thead className="text-gray-300 font-semibold border-b-2 border-b-violet-500/50">
+                                        <tr>
+                                            <th className="p-4 bg-[#0f172a] rounded-tl-lg">Slot #</th>
+                                            <th className="p-4 bg-[#0f172a]">Car Number</th>
+                                            <th className="p-4 bg-[#0f172a]">User Name</th>
+                                            <th className="p-4 bg-[#0f172a]">Email Address</th>
+                                            <th className="p-4 bg-[#0f172a]">Time Remaining</th>
+                                            <th className="p-4 bg-[#0f172a]">Amount Paid</th>
+                                            <th className="p-4 bg-[#0f172a] rounded-tr-lg">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-700/50 bg-gray-800/20">
+                                        {adminBookings.length === 0 ? (
+                                            <tr>
+                                                <td colSpan="7" className="p-8 text-center text-gray-500 font-medium tracking-wide">
+                                                    <div className="flex flex-col items-center gap-2">
+                                                        <svg className="w-10 h-10 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M3 10v4m6-6v10m6-8v8m6-6v4"></path></svg>
+                                                        <span>No active vehicles in the facility.</span>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ) : (
+                                            adminBookings.map(b => {
+                                                const tr = getTimeRemaining(b.end_time);
+                                                return (
+                                                    <tr key={b.id} className="transition">
+                                                        <td className="p-4 font-bold text-blue-400">{b.slot_name || 'Slot ' + b.slot_id}</td>
+                                                        <td className="p-4 uppercase tracking-widest text-yellow-400 font-mono text-xs font-bold">{b.car_number}</td>
+                                                        <td className="p-4 font-medium text-gray-200">{b.user_name}</td>
+                                                        <td className="p-4 text-xs tracking-wide text-gray-400">{b.user_email}</td>
+                                                        <td className="p-4">
+                                                            <span className={`time-badge ${tr.cls}`}>{tr.label}</span>
+                                                        </td>
+                                                        <td className="p-4 text-green-400 font-bold">₹{b.amount}</td>
+                                                        <td className="p-4">
+                                                            <button onClick={() => cancelBooking(b.id)} className="text-xs bg-red-600/20 text-red-500 px-3 py-1.5 rounded hover:bg-red-600/40 font-semibold transition">
+                                                                Revoke
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p className="text-xs text-gray-600 mt-3 text-right">Auto-refreshes every 30 seconds · Only visible to administrators</p>
+                        </div>
+                    )}
 
                     {/* Booking Modal */}
                     {showBookingModal && selectedSlot && (
